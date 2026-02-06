@@ -1,0 +1,424 @@
+# -*- coding: utf-8 -*-
+"""
+Nuclio function generator for CVAT integration.
+
+This script generates Nuclio function files (main.py and function.yaml)
+for each configured model. The generated functions call the FastAPI
+backend for inference.
+
+Usage:
+    python scripts/generate_nuclio_function.py --model yolov12n --output /path/to/output
+
+    # Generate for all models
+    python scripts/generate_nuclio_function.py --all --output /path/to/output
+"""
+
+import argparse
+import os
+import shutil
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+import yaml
+from src.core.config import get_settings
+from src.utils.model_utils import detect_model_type_from_dir, IMPLEMENTATION_FILES
+
+
+# Configure YAML to use block scalars for multi-line strings
+def str_presenter(dumper, data):
+    if len(data.splitlines()) > 1:  # check for multiline string
+        return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+
+
+yaml.add_representer(str, str_presenter)
+
+
+# Model implementation templates
+DETECTOR_TEMPLATE = '''# -*- coding: utf-8 -*-
+"""
+{model_name_title} Detector Implementation.
+"""
+
+from src.core.interfaces import Detector
+
+class {class_name}(Detector):
+    def __init__(self) -> None:
+        # Initialize your model here
+        pass
+
+    def infer(self, image, **kwargs):
+        # Implement inference logic
+        return []
+'''
+
+INTERACTOR_TEMPLATE = '''# -*- coding: utf-8 -*-
+"""
+{model_name_title} Interactor Implementation.
+"""
+
+from src.core.interfaces import Interactor
+
+class {class_name}(Interactor):
+    def __init__(self) -> None:
+        # Initialize your model here
+        pass
+
+    def infer(self, image, **kwargs):
+        # Implement inference logic
+        return []
+'''
+
+TRACKER_TEMPLATE = '''# -*- coding: utf-8 -*-
+"""
+{model_name_title} Tracker Implementation.
+"""
+
+from src.core.interfaces import Tracker
+
+class {class_name}(Tracker):
+    def __init__(self) -> None:
+        # Initialize your model here
+        pass
+
+    def infer(self, image, **kwargs):
+        # Implement inference logic
+        return []
+'''
+
+
+def ensure_model_implementation_exists(model_name: str, model_type: str) -> None:
+    """
+    Ensure the model implementation file exists.
+    If not, create it from a template.
+    """
+    model_dir = project_root / "src" / "models" / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create __init__.py if missing
+    init_py = model_dir / "__init__.py"
+    if not init_py.exists():
+        with open(init_py, "w", encoding="utf-8") as f:
+            f.write("# -*- coding: utf-8 -*-\n")
+
+    # Determine filename based on type
+    filename = IMPLEMENTATION_FILES.get(model_type.lower(), "detector.py")
+
+    impl_file = model_dir / filename
+    if not impl_file.exists():
+        print(f"Implementation file {filename} missing for {model_name}. Creating from template...")
+        
+        template = {
+            "detector": DETECTOR_TEMPLATE,
+            "interactor": INTERACTOR_TEMPLATE,
+            "tracker": TRACKER_TEMPLATE
+        }.get(model_type.lower(), DETECTOR_TEMPLATE)
+
+        class_name_base = model_name.replace("_", " ").title().replace(" ", "")
+        class_name = f"{class_name_base}{model_type.title()}"
+
+        content = template.format(
+            model_name_title=model_name.replace("_", " ").title(),
+            class_name=class_name
+        )
+
+        with open(impl_file, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"Created: {impl_file}")
+
+
+def load_function_yaml_template(model_name: str) -> dict:
+    """
+    Load the Nuclio function YAML template for a model.
+
+    Args:
+        model_name: Name of the model (used to find template).
+
+    Returns:
+        Parsed YAML template as dictionary.
+    """
+    # Try model-specific template first
+    template_path = project_root / "config" / "cvat" / f"{model_name}.yaml"
+
+    if not template_path.exists():
+        # Fallback to generic template
+        template_path = project_root / "config" / "cvat" / "template.yaml"
+
+    if not template_path.exists():
+        raise FileNotFoundError(f"No function template found for {model_name}")
+
+    with open(template_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def generate_handler_code(
+    model_name: str,
+    fastapi_host: str,
+    port: int
+) -> str:
+    """
+    Generate the Nuclio handler Python code.
+
+    Args:
+        model_name: Name of the model.
+        fastapi_host: IP address of the FastAPI server.
+        port: Port number for the model server.
+
+    Returns:
+        Generated Python code as string.
+    """
+    handler_code = f'''# -*- coding: utf-8 -*-
+"""
+Nuclio handler for CVAT {model_name} detection.
+
+Auto-generated by generate_nuclio_function.py
+"""
+
+import json
+import base64
+import io
+import requests
+from PIL import Image
+
+
+def handler(context, event):
+    """
+    Handle CVAT detection request.
+
+    Args:
+        context: Nuclio context object.
+        event: Nuclio event containing the image data.
+
+    Returns:
+        Response with detection results in CVAT format.
+    """
+    context.logger.info("Run {model_name} model")
+
+    data = event.body
+    buf = io.BytesIO(base64.b64decode(data["image"]))
+    image = Image.open(buf)
+
+    # Convert to RGB if necessary
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
+    # Encode image to base64
+    buffered = io.BytesIO()
+    image.save(buffered, format="JPEG")
+    img_str = base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+    # FastAPI endpoint URL
+    fastapi_url = "http://{fastapi_host}:{port}/infer"
+
+    try:
+        # Prepare and send request
+        payload = {{"image_base64": img_str}}
+        response = requests.post(fastapi_url, json=payload, timeout=25)
+        response.raise_for_status()
+
+        # Return FastAPI response directly
+        return context.Response(
+            body=response.text,
+            headers={{}},
+            content_type='application/json',
+            status_code=200
+        )
+
+    except requests.exceptions.RequestException as e:
+        context.logger.error(f"Error communicating with FastAPI service: {{e}}")
+        return context.Response(
+            body=json.dumps({{"error": str(e)}}),
+            headers={{}},
+            content_type='application/json',
+            status_code=500
+        )
+    except Exception as e:
+        context.logger.error(f"Error processing request: {{e}}")
+        return context.Response(
+            body=json.dumps({{"error": str(e)}}),
+            headers={{}},
+            content_type='application/json',
+            status_code=500
+        )
+'''
+    return handler_code
+
+
+# Default classes (fallback)
+DEFAULT_CLASSES = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+    "traffic_light", "fire_hydrant", "stop_sign", "parking_meter", "bench", "bird", "cat",
+    "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+    "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports_ball",
+    "kite", "baseball_bat", "baseball_glove", "skateboard", "surfboard", "tennis_racket",
+    "bottle", "wine_glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+    "sandwich", "orange", "broccoli", "carrot", "hot_dog", "pizza", "donut", "cake",
+    "chair", "couch", "potted_plant", "bed", "dining_table", "toilet", "tv", "laptop",
+    "mouse", "remote", "keyboard", "cell_phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy_bear", "hair_drier", "toothbrush"
+]
+
+
+def get_model_type(impl_name: str) -> str:
+    """
+    Detect model type based on implementation files.
+    """
+    model_dir = project_root / "src" / "models" / impl_name
+    found_type = detect_model_type_from_dir(str(model_dir))
+    return found_type or "detector"
+
+
+def get_model_classes(model_name: str, model_config) -> list:
+    """
+    Get the class list for a model.
+    Checks config, then config/cvat/classes.txt, then fallback to DEFAULT.
+    """
+    # 1. Config (models.yaml)
+    if getattr(model_config, 'classes', None):
+        return model_config.classes
+
+    # 2. Centralized classes.txt next to template.yaml
+    central_classes_txt = project_root / "config" / "cvat" / "classes.txt"
+    if central_classes_txt.exists():
+        with open(central_classes_txt, "r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip()]
+
+    # 3. Fallback to default and create centralized file
+    print(f"No classes found for {model_name} and no global classes.txt found. Creating {central_classes_txt} from template...")
+    try:
+        central_classes_txt.parent.mkdir(parents=True, exist_ok=True)
+        with open(central_classes_txt, "w", encoding="utf-8") as f:
+            for cls in DEFAULT_CLASSES:
+                f.write(f"{cls}\n")
+    except Exception as e:
+        print(f"Warning: Could not create global classes.txt: {e}")
+
+    return DEFAULT_CLASSES
+
+
+def generate_function(
+    model_name: str,
+    output_dir: str,
+    settings=None
+) -> None:
+    """
+    Generate Nuclio function files for a model.
+
+    Args:
+        model_name: Name of the model to generate for.
+        output_dir: Directory to write generated files.
+        settings: Optional settings object (loads from config if None).
+    """
+    import json
+
+    if settings is None:
+        settings = get_settings()
+
+    # Validate model exists in config
+    if model_name not in settings.models:
+        print(f"Error: Model '{model_name}' not found in configuration.")
+        print(f"Available models: {list(settings.models.keys())}")
+        return
+
+    model_config = settings.models[model_name]
+    fastapi_host = settings.cvat.fastapi_host
+    port = model_config.port
+    impl_name = model_config.implementation or model_name
+    model_type = get_model_type(impl_name)
+
+    # Ensure model implementation exists
+    ensure_model_implementation_exists(impl_name, model_type)
+
+    # Get classes
+    classes = get_model_classes(model_name, model_config)
+    spec_list = []
+    for i, name in enumerate(classes):
+        spec_list.append({"id": i, "name": name, "type": "rectangle"})
+
+    # Create output directory
+    function_dir = Path(output_dir) / model_name
+    function_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate main.py
+    handler_code = generate_handler_code(model_name, fastapi_host, port)
+    main_py_path = function_dir / "main.py"
+    with open(main_py_path, "w", encoding="utf-8") as f:
+        f.write(handler_code)
+    print(f"Generated: {main_py_path}")
+
+    # Generate function.yaml
+    try:
+        function_yaml = load_function_yaml_template(model_name)
+        
+        # Update metadata name
+        function_yaml.setdefault("metadata", {})
+        function_yaml["metadata"]["name"] = model_name
+             
+        # Update annotations and spec
+        function_yaml.setdefault("metadata", {}).setdefault("annotations", {})
+        function_yaml["metadata"]["annotations"]["name"] = model_name
+        function_yaml["metadata"]["annotations"]["type"] = model_type
+        # CVAT expects spec to be a JSON string
+        function_yaml["metadata"]["annotations"]["spec"] = json.dumps(spec_list, indent=2)
+
+        # Update spec fields
+        function_yaml.setdefault("spec", {})
+        function_yaml["spec"]["description"] = f"{model_name.replace('_', ' ').title()} {model_type} for CVAT"
+        function_yaml["spec"]["build"]["image"] = f"cvat/{model_name}"
+
+        function_yaml_path = function_dir / "function.yaml"
+        with open(function_yaml_path, "w", encoding="utf-8") as f:
+            yaml.dump(function_yaml, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        print(f"Generated: {function_yaml_path}")
+    except FileNotFoundError as e:
+        print(f"Warning: {e}")
+
+    print(f"\nNuclio function generated in: {function_dir}")
+    print(f"FastAPI endpoint: http://{fastapi_host}:{port}/infer")
+
+
+def main() -> None:
+    """Main entry point for the generator script."""
+    parser = argparse.ArgumentParser(
+        description="Generate Nuclio functions for CVAT integration"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        help="Model name to generate function for"
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Generate for all configured models"
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="./nuclio_functions",
+        help="Output directory (default: ./nuclio_functions)"
+    )
+
+    args = parser.parse_args()
+
+    if not args.model and not args.all:
+        parser.error("Either --model or --all must be specified")
+
+    settings = get_settings()
+
+    if args.all:
+        for model_name in settings.models.keys():
+            print(f"\n{'='*50}")
+            print(f"Generating function for: {model_name}")
+            print('='*50)
+            generate_function(model_name, args.output, settings)
+    else:
+        generate_function(args.model, args.output, settings)
+
+
+if __name__ == "__main__":
+    main()

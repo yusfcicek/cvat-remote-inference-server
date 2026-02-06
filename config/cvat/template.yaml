@@ -1,0 +1,40 @@
+metadata:
+  name: template
+  namespace: cvat
+  annotations:
+    name: Template
+    type: detector
+    framework: pytorch
+    spec: |
+      []
+
+spec:
+  description: AI model serverless function for CVAT
+  runtime: 'python:3.11'
+  handler: main:handler
+  eventTimeout: 30s
+  build:
+    image: cvat/model
+    baseImage: python:3.11-slim
+    directives:
+      preCopy:
+        - kind: RUN
+          value: apt-get update && apt-get install -y curl
+        - kind: WORKDIR
+          value: /opt/nuclio
+      postCopy:
+        - kind: RUN
+          value: pip install requests pillow
+  triggers:
+    myHttpTrigger:
+      maxWorkers: 2
+      kind: 'http'
+      workerAvailabilityTimeoutMilliseconds: 10000
+      attributes:
+        maxRequestBodySize: 33554432 # 32MB
+  platform:
+    attributes:
+      restartPolicy:
+        name: always
+        maximumRetryCount: 3
+      mountMode: volume
