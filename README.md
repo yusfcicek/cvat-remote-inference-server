@@ -1,15 +1,16 @@
-# CVAT Custom Model Orchestrator
+# CVAT Remote Model Orchestrator
 
-Enterprise-level CVAT/Nuclio integration platform with FastAPI. Supports multiple model types (Detector, Tracker, Interactor) with ultra-high performance, dynamic scalability, and zero-config automation.
+Enterprise-level CVAT/Nuclio integration platform with FastAPI. **Run AI models on powerful remote hosts with specialized GPUs** and connect them directly to your CVAT instance via Nuclio with ultra-high performance and zero-config automation.
 
 ## Features
 
+- **Direct Remote Connection**: Models run on a dedicated remote host (Inference Server) and connect to CVAT via automatically generated Nuclio functions.
 - **Multi-Model Type Support**: Handle **Detectors**, **Trackers**, and **Interactors** through a unified interface.
 - **Multi-Instance Support**: Run the same model implementation with different weights or configurations simultaneously.
 - **Generic Configuration**: Pass any custom parameters to models via the `config` block in `models.yaml`.
 - **Auto-Detection & Generation**: New models are detected automatically. If implementation files or `classes.txt` are missing, they are generated using intelligent templates.
 - **Auto-Configuration**: Model types and ports are automatically managed in `config/models.yaml`.
-- **Nuclio Generator**: Dynamic deployment files for CVAT are automatically generated with type-specific annotations and specs.
+- **Nuclio Generator**: Dynamic deployment files for CVAT are automatically generated with type-specific annotations and specs, pre-configured to point to your remote host.
 - **Lazy Initialization**: Models load only when requested, with no overhead during server startup.
 - **Smart Resource Management**: Automatic memory unloading for idle models.
 - **Enterprise Architecture**: Fully typed, PEP8 compliant, and designed for production extensibility.
@@ -30,18 +31,18 @@ graph TD
     C -->|Yes| G
 ```
 
-### 2. Request Flow (CVAT -> Nuclio -> FastAPI)
-Data flows through the generated Nuclio function to the dedicated model server.
+### 2. Request Flow (CVAT -> Nuclio -> Remote Host)
+Data flows through the generated Nuclio function directly to the dedicated **Remote Inference Server**.
 
 ```mermaid
 sequenceDiagram
     participant CVAT
-    participant Nuclio as Nuclio Function
-    participant API as FastAPI Server
+    participant Nuclio as Nuclio Function (Proxy)
+    participant API as FastAPI Server (Remote Host)
     participant Model as AI Model (Detector/Tracker/...)
 
     CVAT->>Nuclio: Send Image (Base64)
-    Nuclio->>API: POST /infer (Forward Request)
+    Nuclio->>API: POST /infer (Forward to Remote Host)
     
     rect rgb(200, 255, 200)
     Note over API, Model: Lazy Initialization
